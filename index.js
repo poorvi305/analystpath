@@ -1,39 +1,53 @@
-// api/index.js - Vercel Serverless Function Entry Point for AnalystPath AI
-const { connectToMongo } = require('../mongo_database');
-const { requestHandler } = require('../server');
+// Universal Serverless Function Entry Point for AnalystPath AI
+const fs = require('fs');
 
-let handler;
+// Serverless Read-Only Filesystem Protection
+try {
+  const origMkdirSync = fs.mkdirSync;
+  fs.mkdirSync = function (targetPath, options) {
+    try {
+      return origMkdirSync.call(fs, targetPath, options);
+    } catch (err) {
+      if (err && (err.code === 'EROFS' || err.code === 'EACCES' || err.code === 'EPERM')) {
+        return undefined;
+      }
+      throw err;
+    }
+  };
+} catch (e) {}
+
+let connectToMongo, requestHandler;
 
 try {
-  const express = require('express');
-  const app = express();
-
-  // Middleware: ensure MongoDB connection is active
-  app.use(async (req, res, next) => {
-    try {
-      await connectToMongo();
-    } catch (e) {
-      console.warn('[MongoDB Serverless Connect Note]', e.message);
-    }
-    next();
-  });
-
-  // Delegate all requests to platform request handler
-  app.use((req, res) => {
-    return requestHandler(req, res);
-  });
-
-  handler = app;
+  ({ connectToMongo } = require('./mongo_database'));
+  ({ requestHandler } = require('./server'));
 } catch (e) {
-  // Direct Serverless Handler fallback
-  handler = async (req, res) => {
-    try {
-      await connectToMongo();
-    } catch (err) {
-      console.warn('[MongoDB Serverless Connect Note]', err.message);
-    }
-    return requestHandler(req, res);
-  };
+  ({ connectToMongo } = require('../mongo_database'));
+  ({ requestHandler } = require('../server'));
 }
 
-module.exports = handler;
+let mongoInitPromise = null;
+
+module.exports = async (req, res) => {
+  if (!mongoInitPromise) {
+    mongoInitPromise = connectToMongo().catch(err => {
+      console.warn('[MongoDB Serverless Connect Note]', err.message);
+      mongoInitPromise = null;
+    });
+  }
+  try {
+    await mongoInitPromise;
+  } catch (e) {
+    // Non-fatal fallback
+  }
+
+  try {
+    return await requestHandler(req, res);
+  } catch (err) {
+    console.error('[Serverless Request Error]', err);
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Serverless invocation error: ' + err.message }));
+    }
+  }
+};
