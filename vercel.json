@@ -1,12 +1,6 @@
 {
   "version": 2,
   "cleanUrls": true,
-  "functions": {
-    "api/index.js": {
-      "includeFiles": "mongo_data_store.json",
-      "maxDuration": 15
-    }
-  },
   "rewrites": [
     {
       "source": "/css/:path*",
