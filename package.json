@@ -7,6 +7,7 @@
     "node": "26.x"
   },
   "scripts": {
+    "build": "node -e \"const fs=require('fs'); if(!fs.existsSync('public')) fs.mkdirSync('public'); for(const f of fs.readdirSync('.')){ if((f.endsWith('.css')||f.endsWith('.js')||f.endsWith('.html')) && !f.startsWith('node_modules') && f!=='server.js' && f!=='database.js' && f!=='mongo_database.js' && f!=='pure_db.js' && f!=='migrate_to_mongodb.js' && f!=='make-admin.js' && f!=='view-db.js' && f!=='view-mongo.js' && !f.startsWith('test_')) fs.copyFileSync(f, 'public/'+f); }\"",
     "start": "node server.js"
   },
   "dependencies": {
