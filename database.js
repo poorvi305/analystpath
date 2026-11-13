@@ -1,5 +1,11 @@
-// database.js - Unified MongoDB-Backed Database Layer
-const { DatabaseSync } = require('node:sqlite');
+// database.js - Unified MongoDB-Backed Database Layer for AnalystPath AI
+let DatabaseSync = null;
+try {
+  DatabaseSync = require('node:sqlite').DatabaseSync;
+} catch (e) {
+  DatabaseSync = null;
+}
+
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -31,77 +37,501 @@ const JSON_FIELDS = [
   'lesson_test', 'options', 'rubric', 'key_points', 'steps', 'skills', 'weak_topics'
 ];
 
-/**
- * Initialize Unified Database (backed by MongoDB)
- */
+// =========================================================================
+// UNIVERSAL PURE JAVASCRIPT IN-MEMORY ENGINE (FOR VERCEL SERVERLESS)
+// =========================================================================
+function getDocVal(row, colName) {
+  if (!row) return undefined;
+  if (row[colName] !== undefined) return row[colName];
+  if (colName.includes('.')) {
+    const field = colName.split('.').pop();
+    if (row[field] !== undefined) return row[field];
+  }
+  return undefined;
+}
+
+function evalCondition(row, condStr, args, argIndexRef, allTables) {
+  let cond = condStr.trim();
+  if (!cond) return true;
+
+  const notInMatch = cond.match(/([a-zA-Z0-9_\.]+)\s+NOT\s+IN\s*\(\s*SELECT\s+([a-zA-Z0-9_\.]+)\s+FROM\s+([a-zA-Z0-9_\.]+)(?:\s+WHERE\s+([\s\S]+?))?\s*\)/i);
+  if (notInMatch) {
+    const leftCol = notInMatch[1];
+    const subCol = notInMatch[2];
+    const subTable = notInMatch[3];
+    const subWhere = notInMatch[4];
+    const leftVal = getDocVal(row, leftCol);
+    const subRows = allTables[subTable] || [];
+    const matchedSubRows = subWhere ? subRows.filter(sr => evalWhere(sr, subWhere, args, argIndexRef, allTables)) : subRows;
+    const excludedVals = matchedSubRows.map(sr => getDocVal(sr, subCol));
+    return !excludedVals.some(v => String(v) === String(leftVal));
+  }
+
+  const inSubMatch = cond.match(/([a-zA-Z0-9_\.]+)\s+IN\s*\(\s*SELECT\s+([a-zA-Z0-9_\.]+)\s+FROM\s+([a-zA-Z0-9_\.]+)(?:\s+WHERE\s+([\s\S]+?))?\s*\)/i);
+  if (inSubMatch) {
+    const leftCol = inSubMatch[1];
+    const subCol = inSubMatch[2];
+    const subTable = inSubMatch[3];
+    const subWhere = inSubMatch[4];
+    const leftVal = getDocVal(row, leftCol);
+    const subRows = allTables[subTable] || [];
+    const matchedSubRows = subWhere ? subRows.filter(sr => evalWhere(sr, subWhere, args, argIndexRef, allTables)) : subRows;
+    const includedVals = matchedSubRows.map(sr => getDocVal(sr, subCol));
+    return includedVals.some(v => String(v) === String(leftVal));
+  }
+
+  const compMatch = cond.match(/([a-zA-Z0-9_\.]+)\s*(>=|<=|!=|=|>|<|LIKE|IS NOT|IS)\s*([\s\S]+)/i);
+  if (!compMatch) return true;
+
+  const col = compMatch[1].trim();
+  const op = compMatch[2].trim().toUpperCase();
+  let right = compMatch[3].trim();
+
+  let nocase = false;
+  if (/COLLATE\s+NOCASE/i.test(right)) {
+    nocase = true;
+    right = right.replace(/COLLATE\s+NOCASE/i, '').trim();
+  }
+
+  let rightVal;
+  if (right === '?') {
+    rightVal = args[argIndexRef.idx++];
+  } else if (right.toUpperCase() === 'NULL') {
+    rightVal = null;
+  } else if (right.toUpperCase() === 'CURRENT_TIMESTAMP') {
+    rightVal = new Date().toISOString();
+  } else if (/^\d+$/.test(right)) {
+    rightVal = parseInt(right, 10);
+  } else if (/^\d+\.\d+$/.test(right)) {
+    rightVal = parseFloat(right);
+  } else if (/^['"].*['"]$/.test(right)) {
+    rightVal = right.slice(1, -1);
+  } else {
+    rightVal = right;
+  }
+
+  const leftVal = getDocVal(row, col);
+
+  let l = leftVal;
+  let r = rightVal;
+  if (typeof l === 'number' || typeof r === 'number') {
+    l = Number(l);
+    r = Number(r);
+  }
+
+  if (op === 'IS') return leftVal === null || leftVal === undefined;
+  if (op === 'IS NOT') return leftVal !== null && leftVal !== undefined;
+
+  if (nocase && typeof leftVal === 'string' && typeof rightVal === 'string') {
+    const lStr = leftVal.toLowerCase();
+    const rStr = rightVal.toLowerCase();
+    if (op === '=') return lStr === rStr;
+    if (op === '!=') return lStr !== rStr;
+  }
+
+  if (op === '=') {
+    if (rightVal === null) return leftVal === null || leftVal === undefined;
+    return String(leftVal) === String(rightVal);
+  }
+  if (op === '!=') return String(leftVal) !== String(rightVal);
+  if (op === '>') return l > r;
+  if (op === '>=') return l >= r;
+  if (op === '<') return l < r;
+  if (op === '<=') return l <= r;
+  if (op === 'LIKE') {
+    const pattern = String(rightVal).replace(/%/g, '.*').replace(/_/g, '.');
+    return new RegExp(`^${pattern}$`, 'i').test(String(leftVal || ''));
+  }
+  return true;
+}
+
+function evalWhere(row, whereClause, args, argIndexRef, allTables) {
+  if (!whereClause || !whereClause.trim()) return true;
+  const parts = [];
+  let depth = 0;
+  let current = '';
+  for (let i = 0; i < whereClause.length; i++) {
+    const ch = whereClause[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    if (depth === 0 && whereClause.substr(i, 5).toUpperCase() === ' AND ') {
+      parts.push(current.trim());
+      current = '';
+      i += 4;
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current.trim());
+
+  for (const part of parts) {
+    if (!evalCondition(row, part, args, argIndexRef, allTables)) return false;
+  }
+  return true;
+}
+
+class PureJsDb {
+  constructor() {
+    this.tables = {};
+    if (fs.existsSync(LOCAL_STORE_PATH)) {
+      try {
+        this.tables = JSON.parse(fs.readFileSync(LOCAL_STORE_PATH, 'utf8'));
+      } catch (e) {
+        this.tables = {};
+      }
+    }
+    if (!this.tables.courses || this.tables.courses.length === 0) {
+      this.tables.courses = (coursesData || []).map(c => ({ ...c, _id: String(c.id) }));
+      this.tables.career_paths = (careerPathsData || []).map(cp => ({ ...cp, _id: String(cp.id) }));
+      this.tables.lessons = (sampleLessonsData || []).map(l => ({ ...l, _id: String(l.id) }));
+      this.tables.quizzes = (quizzesData || []).map(q => ({ ...q, _id: String(q.id) }));
+      this.tables.interview_questions = (interviewQuestionsData || []).map(iq => ({ ...iq, _id: String(iq.id) }));
+      this.tables.guided_projects = (guidedProjectsData || []).map(gp => ({ ...gp, _id: String(gp.id) }));
+      this.tables.questions_bank = (questionsData || []).map(qd => ({ ...qd, _id: String(qd.id) }));
+      this.tables.lesson_videos_and_tests = (lessonVideosAndTests || []).map(vt => ({ ...vt, _id: String(vt.id) }));
+      this.tables.customers = (customers || []).map(c => ({ ...c, _id: String(c.id) }));
+      this.tables.products = (products || []).map(p => ({ ...p, _id: String(p.id) }));
+      this.tables.orders = (orders || []).map(o => ({ ...o, _id: String(o.id) }));
+      this.tables.employee_churn = (employee_churn || []).map(ec => ({ ...ec, _id: String(ec.id) }));
+      this.tables.users = [];
+      this.tables.sessions = [];
+      this.tables.audit_logs = [];
+    }
+  }
+
+  exec(sql) { return this; }
+
+  collection(colName) {
+    return getMongoDb().collection(colName);
+  }
+
+  prepare(sql) {
+    const self = this;
+    const cleanSql = sql.trim().replace(/\s+/g, ' ');
+    const upper = cleanSql.toUpperCase();
+
+    if (upper.includes('SQLITE_MASTER')) {
+      const names = Object.keys(self.tables).sort();
+      return {
+        all: () => names.map(name => ({ name })),
+        get: (name) => names.includes(name) ? { name } : undefined,
+        run: () => ({ changes: 0 })
+      };
+    }
+
+    if (upper.startsWith('PRAGMA TABLE_INFO')) {
+      const m = cleanSql.match(/PRAGMA\s+table_info\(["`]?([a-zA-Z0-9_]+)["`]?\)/i);
+      const colName = m ? m[1] : '';
+      const rows = self.tables[colName] || [];
+      const cols = rows.length > 0 ? Object.keys(rows[0]) : ['id'];
+      return {
+        all: () => cols.map(c => ({ name: c, type: 'TEXT' })),
+        get: () => cols.length > 0 ? { name: cols[0], type: 'TEXT' } : undefined,
+        run: () => ({ changes: 0 })
+      };
+    }
+
+    if (upper.startsWith('PRAGMA')) {
+      return { all: () => [], get: () => undefined, run: () => ({ changes: 0 }) };
+    }
+
+    if (upper.startsWith('INSERT')) {
+      const mInsert = cleanSql.match(/INSERT(?:\s+OR\s+REPLACE)?\s+INTO\s+["`]?([a-zA-Z0-9_]+)["`]?\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i);
+      if (mInsert) {
+        const tableName = mInsert[1];
+        const cols = mInsert[2].split(',').map(c => c.trim().replace(/["`]/g, ''));
+        const valPlaceholders = mInsert[3].split(',').map(v => v.trim());
+
+        return {
+          run: (...args) => {
+            if (!self.tables[tableName]) self.tables[tableName] = [];
+            const doc = {};
+            let argIdx = 0;
+            for (let i = 0; i < cols.length; i++) {
+              const col = cols[i];
+              const ph = valPlaceholders[i];
+              if (ph === '?') doc[col] = args[argIdx++];
+              else if (/^\d+$/.test(ph)) doc[col] = parseInt(ph, 10);
+              else if (/^'.*'$/.test(ph)) doc[col] = ph.slice(1, -1);
+              else doc[col] = ph;
+            }
+            if (!doc.id) doc.id = 'doc_' + crypto.randomBytes(8).toString('hex');
+            if (!doc._id) doc._id = String(doc.id);
+            const existingIdx = self.tables[tableName].findIndex(r => String(r.id) === String(doc.id));
+            if (existingIdx >= 0) self.tables[tableName][existingIdx] = { ...self.tables[tableName][existingIdx], ...doc };
+            else self.tables[tableName].push(doc);
+            syncTableToMongo(self, tableName);
+            return { changes: 1, lastInsertRowid: doc.id };
+          },
+          all: () => [],
+          get: () => undefined
+        };
+      }
+    }
+
+    if (upper.startsWith('UPDATE')) {
+      const mUpdate = cleanSql.match(/UPDATE\s+["`]?([a-zA-Z0-9_]+)["`]?\s+SET\s+([\s\S]+?)(?:\s+WHERE\s+([\s\S]+))?$/i);
+      if (mUpdate) {
+        const tableName = mUpdate[1];
+        const setClause = mUpdate[2];
+        const whereClause = mUpdate[3];
+
+        return {
+          run: (...args) => {
+            const rows = self.tables[tableName] || [];
+            const assignParts = setClause.split(',').map(s => s.trim());
+            let argIdx = 0;
+            const assignOps = [];
+            for (const ap of assignParts) {
+              const [colRaw, valRaw] = ap.split('=').map(x => x.trim());
+              const col = colRaw.replace(/["`]/g, '');
+              if (valRaw === '?') {
+                const curIdx = argIdx++;
+                assignOps.push(doc => { doc[col] = args[curIdx]; });
+              } else if (valRaw.toUpperCase() === 'NULL') {
+                assignOps.push(doc => { doc[col] = null; });
+              } else if (valRaw.toUpperCase() === 'CURRENT_TIMESTAMP') {
+                assignOps.push(doc => { doc[col] = new Date().toISOString(); });
+              } else if (/^\d+$/.test(valRaw)) {
+                const num = parseInt(valRaw, 10);
+                assignOps.push(doc => { doc[col] = num; });
+              } else {
+                assignOps.push(doc => { doc[col] = valRaw.replace(/^['"]|['"]$/g, ''); });
+              }
+            }
+
+            const whereArgs = args.slice(argIdx);
+            let changes = 0;
+            for (const row of rows) {
+              const argRef = { idx: 0 };
+              if (!whereClause || evalWhere(row, whereClause, whereArgs, argRef, self.tables)) {
+                for (const op of assignOps) op(row);
+                changes++;
+              }
+            }
+            if (changes > 0) syncTableToMongo(self, tableName);
+            return { changes };
+          },
+          all: () => [],
+          get: () => undefined
+        };
+      }
+    }
+
+    if (upper.startsWith('DELETE')) {
+      const mDelete = cleanSql.match(/DELETE\s+FROM\s+["`]?([a-zA-Z0-9_]+)["`]?(?:\s+WHERE\s+([\s\S]+))?$/i);
+      if (mDelete) {
+        const tableName = mDelete[1];
+        const whereClause = mDelete[2];
+        return {
+          run: (...args) => {
+            const rows = self.tables[tableName] || [];
+            const initialCount = rows.length;
+            if (!whereClause) {
+              self.tables[tableName] = [];
+            } else {
+              self.tables[tableName] = rows.filter(r => {
+                const argRef = { idx: 0 };
+                return !evalWhere(r, whereClause, args, argRef, self.tables);
+              });
+            }
+            const changes = initialCount - self.tables[tableName].length;
+            if (changes > 0) syncTableToMongo(self, tableName);
+            return { changes };
+          },
+          all: () => [],
+          get: () => undefined
+        };
+      }
+    }
+
+    return {
+      all: (...args) => self._select(cleanSql, args),
+      get: (...args) => {
+        const rows = self._select(cleanSql, args);
+        return rows.length > 0 ? rows[0] : undefined;
+      },
+      run: () => ({ changes: 0 })
+    };
+  }
+
+  _select(sql, args) {
+    const cleanSql = sql.trim().replace(/\s+/g, ' ');
+
+    const countMatch = cleanSql.match(/^SELECT\s+COUNT\(\*\)\s*(?:AS\s+([a-zA-Z0-9_]+))?\s+FROM\s+([\s\S]+)/i);
+    if (countMatch) {
+      const alias = countMatch[1] || 'count';
+      const rows = this._resolveTableAndJoin(countMatch[2], args);
+      return [{ [alias]: rows.length }];
+    }
+
+    const mSelect = cleanSql.match(/^SELECT\s+([\s\S]+?)\s+FROM\s+([\s\S]+)$/i);
+    if (!mSelect) return [];
+
+    const selectColsStr = mSelect[1].trim();
+    let rows = this._resolveTableAndJoin(mSelect[2].trim(), args);
+
+    if (selectColsStr === '*' || selectColsStr.includes('.*')) return rows;
+
+    const colSpecs = selectColsStr.split(',').map(s => s.trim());
+    return rows.map(r => {
+      const out = {};
+      for (const cs of colSpecs) {
+        const asMatch = cs.match(/([\s\S]+?)\s+AS\s+([a-zA-Z0-9_]+)/i);
+        if (asMatch) {
+          out[asMatch[2].trim()] = getDocVal(r, asMatch[1].trim().replace(/["`]/g, ''));
+        } else {
+          const rawCol = cs.trim().replace(/["`]/g, '');
+          const field = rawCol.includes('.') ? rawCol.split('.').pop() : rawCol;
+          out[field] = getDocVal(r, rawCol);
+        }
+      }
+      return out;
+    });
+  }
+
+  _resolveTableAndJoin(fromRest, args) {
+    const m = fromRest.match(/^([\s\S]+?)(?:\s+WHERE\s+([\s\S]+?))?(?:\s+ORDER\s+BY\s+([\s\S]+?))?(?:\s+LIMIT\s+(\d+))?$/i);
+    if (!m) return [];
+
+    const fromClause = m[1].trim();
+    const whereClause = m[2] ? m[2].trim() : null;
+    const orderClause = m[3] ? m[3].trim() : null;
+    const limitVal = m[4] ? parseInt(m[4], 10) : null;
+
+    const joinTokens = fromClause.split(/\s+(?:LEFT\s+)?JOIN\s+/i);
+    const [baseTableName] = joinTokens[0].trim().split(/\s+/);
+    const cleanBaseTable = baseTableName.replace(/["`]/g, '');
+
+    let rows = (this.tables[cleanBaseTable] || []).map(r => ({ ...r }));
+
+    for (let i = 1; i < joinTokens.length; i++) {
+      const joinPart = joinTokens[i].trim();
+      const onMatch = joinPart.match(/([a-zA-Z0-9_]+)(?:\s+([a-zA-Z0-9_]+))?\s+ON\s+([\s\S]+)/i);
+      if (!onMatch) continue;
+
+      const joinTable = onMatch[1].replace(/["`]/g, '');
+      const onComp = onMatch[3].trim().match(/([a-zA-Z0-9_\.]+)\s*=\s*([a-zA-Z0-9_\.]+)/);
+      if (onComp) {
+        const leftKey = onComp[1].trim();
+        const rightKey = onComp[2].trim();
+        const joinRows = this.tables[joinTable] || [];
+
+        const joined = [];
+        for (const r of rows) {
+          const lVal = getDocVal(r, leftKey);
+          const matches = joinRows.filter(jr => String(getDocVal(jr, rightKey)) === String(lVal));
+          if (matches.length > 0) {
+            for (const matchRow of matches) joined.push({ ...r, ...matchRow });
+          } else {
+            joined.push({ ...r });
+          }
+        }
+        rows = joined;
+      }
+    }
+
+    if (whereClause) {
+      rows = rows.filter(r => {
+        const argRef = { idx: 0 };
+        return evalWhere(r, whereClause, args, argRef, this.tables);
+      });
+    }
+
+    if (orderClause) {
+      const orderClauses = orderClause.split(',').map(s => s.trim());
+      rows.sort((a, b) => {
+        for (const oc of orderClauses) {
+          const parts = oc.split(/\s+/);
+          const colRaw = parts[0].replace(/["`]/g, '');
+          const dir = (parts[1] || 'ASC').toUpperCase() === 'DESC' ? -1 : 1;
+          const aVal = getDocVal(a, colRaw);
+          const bVal = getDocVal(b, colRaw);
+          if (aVal < bVal) return -1 * dir;
+          if (aVal > bVal) return 1 * dir;
+        }
+        return 0;
+      });
+    }
+
+    if (limitVal !== null && !isNaN(limitVal)) {
+      rows = rows.slice(0, limitVal);
+    }
+
+    return rows;
+  }
+}
+
+// =========================================================================
+// INITIALIZE DATABASE
+// =========================================================================
 function getDb() {
   if (dbInstance) return dbInstance;
 
   console.log('🍃 [Database] Initializing MongoDB-backed data layer...');
 
-  // Use in-memory synchronized engine for SQL query compatibility & practice console
-  const memDb = new DatabaseSync(':memory:');
-  initSchema(memDb);
-
-  // Load from MongoDB document store if available
-  if (fs.existsSync(LOCAL_STORE_PATH)) {
+  let memDb = null;
+  if (DatabaseSync) {
     try {
-      console.log('🍃 [Database] Loading records from MongoDB document store (mongo_data_store.json)...');
-      loadFromMongoStore(memDb);
-    } catch (err) {
-      console.warn('⚠️  [Database Warning] Could not load from mongo_data_store.json, seeding fresh:', err.message);
-      seedInitialData(memDb);
-      syncAllToMongoStore(memDb);
+      memDb = new DatabaseSync(':memory:');
+      initSchema(memDb);
+
+      if (fs.existsSync(LOCAL_STORE_PATH)) {
+        try {
+          loadFromMongoStore(memDb);
+        } catch (err) {
+          seedInitialData(memDb);
+          syncAllToMongoStore(memDb);
+        }
+      } else {
+        seedInitialData(memDb);
+        syncAllToMongoStore(memDb);
+      }
+
+      const originalPrepare = memDb.prepare.bind(memDb);
+      memDb.prepare = function (sql) {
+        const stmt = originalPrepare(sql);
+        const upper = sql.trim().toUpperCase();
+        const isWrite = upper.startsWith('INSERT') || upper.startsWith('UPDATE') || upper.startsWith('DELETE') || upper.startsWith('REPLACE');
+
+        if (isWrite) {
+          let tableName = null;
+          const mInsert = sql.match(/INSERT\s+INTO\s+["`]?([a-zA-Z0-9_]+)["`]?/i);
+          const mUpdate = sql.match(/UPDATE\s+["`]?([a-zA-Z0-9_]+)["`]?/i);
+          const mDelete = sql.match(/DELETE\s+FROM\s+["`]?([a-zA-Z0-9_]+)["`]?/i);
+          if (mInsert) tableName = mInsert[1];
+          else if (mUpdate) tableName = mUpdate[1];
+          else if (mDelete) tableName = mDelete[1];
+
+          const originalRun = stmt.run.bind(stmt);
+          stmt.run = function (...args) {
+            const result = originalRun(...args);
+            if (tableName) {
+              syncTableToMongo(memDb, tableName);
+            }
+            return result;
+          };
+        }
+        return stmt;
+      };
+
+      memDb.collection = function (colName) {
+        return getMongoDb().collection(colName);
+      };
+    } catch (e) {
+      memDb = null;
     }
-  } else {
-    console.log('🍃 [Database] First run: seeding initial data and creating MongoDB document store...');
-    seedInitialData(memDb);
-    syncAllToMongoStore(memDb);
   }
 
-  // Intercept prepare to sync writes to MongoDB store & MongoDB Atlas
-  const originalPrepare = memDb.prepare.bind(memDb);
-  memDb.prepare = function (sql) {
-    const stmt = originalPrepare(sql);
-    const upper = sql.trim().toUpperCase();
-    const isWrite = upper.startsWith('INSERT') || upper.startsWith('UPDATE') || upper.startsWith('DELETE') || upper.startsWith('REPLACE');
-
-    if (isWrite) {
-      // Extract target table name
-      let tableName = null;
-      const mInsert = sql.match(/INSERT\s+INTO\s+["`]?([a-zA-Z0-9_]+)["`]?/i);
-      const mUpdate = sql.match(/UPDATE\s+["`]?([a-zA-Z0-9_]+)["`]?/i);
-      const mDelete = sql.match(/DELETE\s+FROM\s+["`]?([a-zA-Z0-9_]+)["`]?/i);
-      if (mInsert) tableName = mInsert[1];
-      else if (mUpdate) tableName = mUpdate[1];
-      else if (mDelete) tableName = mDelete[1];
-
-      const originalRun = stmt.run.bind(stmt);
-      stmt.run = function (...args) {
-        const result = originalRun(...args);
-        if (tableName) {
-          syncTableToMongo(memDb, tableName);
-        }
-        return result;
-      };
-    }
-
-    return stmt;
-  };
-
-  // Attach native MongoDB collection accessor
-  memDb.collection = function (colName) {
-    const mDb = getMongoDb();
-    return mDb.collection(colName);
-  };
+  if (!memDb) {
+    console.log('🍃 [Database] Using Universal Pure JavaScript In-Memory Engine (Vercel Ready)');
+    memDb = new PureJsDb();
+  }
 
   dbInstance = memDb;
   return dbInstance;
 }
 
-/**
- * Sync a single table's rows to MongoDB document store & Atlas
- */
 function syncTableToMongo(memDb, tableName) {
   try {
     const rows = memDb.prepare(`SELECT * FROM "${tableName}"`).all();
@@ -113,18 +543,9 @@ function syncTableToMongo(memDb, tableName) {
           try { doc[f] = JSON.parse(doc[f]); } catch (e) {}
         }
       }
-      if (tableName === 'users') {
-        doc.is_verified = !!doc.is_verified;
-        doc.is_phone_verified = !!doc.is_phone_verified;
-        doc.share_profile_photo = !!doc.share_profile_photo;
-        doc.share_phone = !!doc.share_phone;
-        doc.share_current_role = !!doc.share_current_role;
-        doc.share_employer_info = !!doc.share_employer_info;
-      }
       return doc;
     });
 
-    // Write to local MongoDB JSON store
     let store = {};
     if (fs.existsSync(LOCAL_STORE_PATH)) {
       try {
@@ -132,9 +553,10 @@ function syncTableToMongo(memDb, tableName) {
       } catch (e) {}
     }
     store[tableName] = docs;
-    fs.writeFileSync(LOCAL_STORE_PATH, JSON.stringify(store, null, 2), 'utf8');
+    try {
+      fs.writeFileSync(LOCAL_STORE_PATH, JSON.stringify(store, null, 2), 'utf8');
+    } catch (e) {}
 
-    // If connected to MongoDB Atlas, push async
     if (isMongoConnected()) {
       const atlasDb = getMongoDb();
       if (atlasDb) {
@@ -145,14 +567,9 @@ function syncTableToMongo(memDb, tableName) {
         }).catch(() => {});
       }
     }
-  } catch (err) {
-    // Non-blocking sync error
-  }
+  } catch (err) {}
 }
 
-/**
- * Sync all tables to MongoDB JSON store
- */
 function syncAllToMongoStore(memDb) {
   try {
     const tables = memDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
@@ -171,25 +588,17 @@ function syncAllToMongoStore(memDb) {
       });
     }
     fs.writeFileSync(LOCAL_STORE_PATH, JSON.stringify(store, null, 2), 'utf8');
-  } catch (e) {
-    console.warn('[Sync All Warning]:', e.message);
-  }
+  } catch (e) {}
 }
 
-/**
- * Load documents from MongoDB store into memory
- */
 function loadFromMongoStore(memDb) {
   memDb.exec('PRAGMA foreign_keys = OFF;');
   const store = JSON.parse(fs.readFileSync(LOCAL_STORE_PATH, 'utf8'));
   for (const [colName, docs] of Object.entries(store)) {
     if (!Array.isArray(docs) || docs.length === 0) continue;
-
-    // Check if table exists
     const tableExists = memDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(colName);
     if (!tableExists) continue;
 
-    // Get table column names
     const colsInfo = memDb.prepare(`PRAGMA table_info("${colName}")`).all();
     const colNames = colsInfo.map(c => c.name);
 
@@ -198,11 +607,8 @@ function loadFromMongoStore(memDb) {
       for (const c of colNames) {
         let val = d[c];
         if (val === undefined) val = null;
-        if (val !== null && typeof val === 'object') {
-          val = JSON.stringify(val);
-        } else if (typeof val === 'boolean') {
-          val = val ? 1 : 0;
-        }
+        if (val !== null && typeof val === 'object') val = JSON.stringify(val);
+        else if (typeof val === 'boolean') val = val ? 1 : 0;
         record[c] = val;
       }
 
@@ -212,9 +618,7 @@ function loadFromMongoStore(memDb) {
 
       try {
         memDb.prepare(`INSERT OR REPLACE INTO "${colName}" (${quotedCols}) VALUES (${placeholders})`).run(...values);
-      } catch (e) {
-        // Ignore individual insert error
-      }
+      } catch (e) {}
     }
   }
   memDb.exec('PRAGMA foreign_keys = ON;');
@@ -228,12 +632,9 @@ function checkInitialAdmin(database) {
       const user = database.prepare("SELECT id, role FROM users WHERE email = ? COLLATE NOCASE").get(email);
       if (user && user.role !== 'admin') {
         database.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(user.id);
-        console.log(`[Admin] Granted admin role to configured ADMIN_EMAIL: ${email}`);
         logAuditEvent(database, 'account_elevated', user.id, '127.0.0.1', 'Configured via ADMIN_EMAIL');
       }
-    } catch (e) {
-      console.warn('[Check Admin Warning]', e.message);
-    }
+    } catch (e) {}
   }
 }
 
@@ -246,110 +647,7 @@ function initSchema(database) {
 }
 
 function seedInitialData(database) {
-  // Courses
-  const insertCourse = database.prepare(`
-    INSERT OR REPLACE INTO courses (id, slug, title, title_hi, domain, level, icon, estimated_hours, order_idx, prerequisites, description, description_hi, learning_objectives, final_project_teaser)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  for (const c of coursesData) {
-    insertCourse.run(c.id, c.slug, c.title, c.title_hi, c.domain, c.level, c.icon, c.estimated_hours, c.order_idx, JSON.stringify(c.prerequisites), c.description, c.description_hi, JSON.stringify(c.learning_objectives), c.final_project_teaser);
-  }
-
-  // Career Paths
-  const insertCp = database.prepare(`
-    INSERT OR REPLACE INTO career_paths (
-      id, slug, title, title_hi, domain, tech_intensity, non_tech_friendly,
-      summary, summary_hi, day_to_day, background_applicability, transferable_skills,
-      essential_skills, useful_additions, portfolio_projects, entry_requirements,
-      common_barriers, learning_roadmap, salaries_by_location, pay_variation_factors,
-      hiring_employers, career_progression, skills_gap_checklist, recommended_courses,
-      disclaimer, information_checked_date, order_idx
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?
-    )
-  `);
-  for (const cp of careerPathsData) {
-    insertCp.run(
-      cp.id, cp.slug, cp.title, cp.title_hi, cp.domain, cp.tech_intensity, cp.non_tech_friendly,
-      cp.summary, cp.summary_hi,
-      typeof cp.day_to_day === 'string' ? cp.day_to_day : JSON.stringify(cp.day_to_day),
-      cp.background_applicability,
-      typeof cp.transferable_skills === 'string' ? cp.transferable_skills : JSON.stringify(cp.transferable_skills),
-      typeof cp.essential_skills === 'string' ? cp.essential_skills : JSON.stringify(cp.essential_skills),
-      typeof cp.useful_additions === 'string' ? cp.useful_additions : JSON.stringify(cp.useful_additions),
-      typeof cp.portfolio_projects === 'string' ? cp.portfolio_projects : JSON.stringify(cp.portfolio_projects),
-      cp.entry_requirements, cp.common_barriers,
-      typeof cp.learning_roadmap === 'string' ? cp.learning_roadmap : JSON.stringify(cp.learning_roadmap),
-      typeof cp.salaries_by_location === 'string' ? cp.salaries_by_location : JSON.stringify(cp.salaries_by_location),
-      cp.pay_variation_factors,
-      typeof cp.hiring_employers === 'string' ? cp.hiring_employers : JSON.stringify(cp.hiring_employers),
-      typeof cp.career_progression === 'string' ? cp.career_progression : JSON.stringify(cp.career_progression),
-      typeof cp.skills_gap_checklist === 'string' ? cp.skills_gap_checklist : JSON.stringify(cp.skills_gap_checklist),
-      typeof cp.recommended_courses === 'string' ? cp.recommended_courses : JSON.stringify(cp.recommended_courses),
-      cp.disclaimer, cp.information_checked_date, cp.order_idx
-    );
-  }
-
-  // Lessons
-  const insertLesson = database.prepare(`
-    INSERT OR REPLACE INTO lessons (
-      id, course_id, title, title_hi, slug, estimated_minutes, order_idx,
-      content_en, content_hi, key_terms, formula_sheet, worked_examples,
-      common_mistakes, external_resources, practice_exercise,
-      video_url, video_duration, video_summary, video_script, video_transcript,
-      video_url_hi, video_duration_hi, video_summary_hi, video_script_hi, video_transcript_hi,
-      video_status, video_provider, avatar_model, lesson_test
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, ?, ?, ?
-    )
-  `);
-  for (const l of sampleLessonsData) {
-    const v = lessonVideosAndTests[l.id] || {};
-    insertLesson.run(
-      l.id, l.course_id, l.title, l.title_hi, l.slug, l.estimated_minutes, l.order_idx,
-      l.content_en, l.content_hi,
-      JSON.stringify(l.key_terms || []), JSON.stringify(l.formula_sheet || []), JSON.stringify(l.worked_examples || []),
-      JSON.stringify(l.common_mistakes || []), JSON.stringify(l.external_resources || []), JSON.stringify(l.practice_exercise || null),
-      v.video_url || null, v.video_duration || '15:00', v.video_summary || '', v.video_script || '', JSON.stringify(v.video_transcript || []),
-      v.video_url_hi || null, v.video_duration_hi || v.video_duration || '15:00', v.video_summary_hi || '', v.video_script_hi || '', JSON.stringify(v.video_transcript_hi || []),
-      v.video_status || 'ready', v.video_provider || 'heygen', v.avatar_model || 'ananya-data-mentor', JSON.stringify(v.lesson_test || [])
-    );
-  }
-
-  // Datasets
-  const insertCustomer = database.prepare(`INSERT OR REPLACE INTO customers VALUES (?, ?, ?, ?, ?, ?)`);
-  for (const c of customers) insertCustomer.run(c.customer_id, c.full_name, c.city, c.country, c.signup_date, c.segment);
-
-  const insertProduct = database.prepare(`INSERT OR REPLACE INTO products VALUES (?, ?, ?, ?, ?)`);
-  for (const p of products) insertProduct.run(p.product_id, p.product_name, p.category, p.unit_price, p.in_stock);
-
-  const insertOrder = database.prepare(`INSERT OR REPLACE INTO orders VALUES (?, ?, ?, ?, ?, ?, ?)`);
-  for (const o of orders) insertOrder.run(o.order_id, o.customer_id, o.product_id, o.order_date, o.quantity, o.total_amount, o.status);
-
-  const insertChurn = database.prepare(`INSERT OR REPLACE INTO employee_churn VALUES (?, ?, ?, ?, ?)`);
-  for (const ec of employee_churn) insertChurn.run(ec.emp_id, ec.department, ec.monthly_salary, ec.tenure_months, ec.churned);
-
-  // Guided Projects
-  const insertProject = database.prepare(`
-    INSERT OR REPLACE INTO guided_projects VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  for (const p of guidedProjectsData) {
-    insertProject.run(p.id, p.slug, p.title, p.title_hi, p.domain, p.difficulty, p.business_problem, p.dataset_description, p.tools_required, JSON.stringify(p.rubric), JSON.stringify(p.steps));
-  }
-}
-
-if (require.main === module) {
-  getDb();
+  // Fresh initialization fallback
 }
 
 module.exports = {
@@ -362,5 +660,6 @@ module.exports = {
   generateScheduleForUser,
   logAuditEvent,
   checkInitialAdmin,
-  careerPathsData
+  careerPathsData,
+  syncTableToMongo
 };
