@@ -1,16 +1,9 @@
 {
   "version": 2,
-  "outputDirectory": ".",
-  "functions": {
-    "api/index.js": {
-      "memory": 1024,
-      "maxDuration": 15
-    }
-  },
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api?path=$1"
+      "destination": "/api"
     }
   ]
 }
