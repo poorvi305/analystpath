@@ -1,14 +1,18 @@
 {
   "version": 2,
-  "cleanUrls": true,
-  "rewrites": [
+  "builds": [
     {
-      "source": "/api/(.*)",
-      "destination": "/index.js"
-    },
+      "src": "index.js",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": ["mongo_data_store.json", "all_schemas.sql", "*.html", "*.css", "*.js"]
+      }
+    }
+  ],
+  "routes": [
     {
-      "source": "/((?!api/).*)",
-      "destination": "/index.html"
+      "src": "/(.*)",
+      "dest": "index.js"
     }
   ]
 }
