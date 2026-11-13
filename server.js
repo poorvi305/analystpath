@@ -14,11 +14,14 @@ const { mockInterviewRounds } = require('./comprehensive_interview_data');
 
 // Configuration
 const PORT = process.env.PORT || 3000;
-const PUBLIC_DIR = path.join(__dirname, 'public');
-const AVATARS_DIR = path.join(PUBLIC_DIR, 'uploads', 'avatars');
-if (!fs.existsSync(AVATARS_DIR)) {
-  fs.mkdirSync(AVATARS_DIR, { recursive: true });
-}
+const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+const PUBLIC_DIR = fs.existsSync(path.join(__dirname, 'public')) ? path.join(__dirname, 'public') : __dirname;
+const AVATARS_DIR = isServerless ? path.join('/tmp', 'uploads', 'avatars') : path.join(PUBLIC_DIR, 'uploads', 'avatars');
+try {
+  if (!fs.existsSync(AVATARS_DIR)) {
+    fs.mkdirSync(AVATARS_DIR, { recursive: true });
+  }
+} catch (e) {}
 const APP_NAME = process.env.APP_NAME || 'Data Analyst Learning Platform';
 const SESSION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
