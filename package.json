@@ -4,7 +4,7 @@
   "description": "AnalystPath AI - Responsive AI-Powered Data Analyst Learning Platform & Career Coach",
   "main": "server.js",
   "engines": {
-    "node": "20.x"
+    "node": "26.x"
   },
   "scripts": {
     "start": "node server.js"
