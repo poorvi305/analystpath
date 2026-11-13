@@ -2,34 +2,17 @@
   "name": "analystpath-ai",
   "version": "1.0.0",
   "description": "AnalystPath AI - Responsive AI-Powered Data Analyst Learning Platform & Career Coach",
-  "main": "server.js",
+  "main": "index.js",
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
     "start": "node server.js",
-    "build": "echo 'Vercel build complete'",
-    "test": "node test_mongodb.js && node test_internal.js && node test_career_and_profile.js && node test_e2e_full.js",
-    "migrate": "node migrate_to_mongodb.js",
-    "view-mongo": "node view-mongo.js"
+    "build": "echo 'Vercel build complete'"
   },
   "dependencies": {
     "mongodb": "^7.8.0",
     "bson": "^7.3.3",
     "express": "^4.21.2"
-  },
-  "keywords": [
-    "data-analyst",
-    "learning-platform",
-    "ai-tutor",
-    "sql",
-    "python",
-    "excel",
-    "power-bi",
-    "tableau",
-    "statistics",
-    "hinglish"
-  ],
-  "author": "AnalystPath AI Team",
-  "license": "MIT"
+  }
 }
