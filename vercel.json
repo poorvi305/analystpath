@@ -1,18 +1,28 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "index.js",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": ["mongo_data_store.json", "all_schemas.sql", "*.html", "*.css", "*.js"]
-      }
+  "cleanUrls": true,
+  "functions": {
+    "api/index.js": {
+      "includeFiles": "mongo_data_store.json",
+      "maxDuration": 15
     }
-  ],
-  "routes": [
+  },
+  "rewrites": [
     {
-      "src": "/(.*)",
-      "dest": "index.js"
+      "source": "/css/:path*",
+      "destination": "/:path*"
+    },
+    {
+      "source": "/js/:path*",
+      "destination": "/:path*"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
     }
   ]
 }
