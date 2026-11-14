@@ -192,7 +192,23 @@
           allUsers[user.email] = { user, password: body.password || 'password123' };
           localStorage.setItem('ap_registered_users', JSON.stringify(allUsers));
         } catch (e) {}
-        // ===== CLOUD NOTIFICATION: Web3Forms (fire & forget — no delay on login) =====
+        // ===== GOOGLE SHEET: Auto-save student data =====
+        try {
+          fetch('https://script.google.com/macros/s/AKfycbwrc65kFVZi63nyY23txNsqj6va5wRuTBye7pyInelHIvke3YPoXP--KoIQ4wj-PfzM/exec', {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: user.name,
+              email: user.email,
+              target_role: user.target_role || 'Data Analyst',
+              onboarding_role: user.onboarding_role || 'Student',
+              college_name: user.college_name || user.current_company || '',
+              preferred_language: user.preferred_language || 'Hinglish'
+            })
+          }).catch(function(){});
+        } catch (e) {}
+        // ===== EMAIL NOTIFICATION: Web3Forms =====
         try {
           fetch('https://api.web3forms.com/submit', {
             method: 'POST',
