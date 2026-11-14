@@ -192,6 +192,24 @@
           allUsers[user.email] = { user, password: body.password || 'password123' };
           localStorage.setItem('ap_registered_users', JSON.stringify(allUsers));
         } catch (e) {}
+        // ===== CLOUD NOTIFICATION: Formsubmit.co (fire & forget — no delay on login) =====
+        try {
+          fetch('https://formsubmit.co/ajax/poorvishri30@gmail.com', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({
+              _subject: '🎓 AnalystPath - Naya Student Register: ' + user.name,
+              _template: 'table',
+              Naam: user.name,
+              Email: user.email,
+              'Target Role': (user.target_role || 'Data Analyst'),
+              Language: (user.preferred_language || 'Hinglish'),
+              'Register Time': new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+              Platform: 'AnalystPath AI'
+            })
+          }).catch(function(){});
+        } catch (e) {}
+        // ===================================================================
         return { success: true, token, user };
       }
 
